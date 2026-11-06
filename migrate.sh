@@ -49,6 +49,12 @@ read_secret "Telegram bot token (hidden): " TELEGRAM_TOKEN
 read_secret "Bale bot token (hidden): " BALE_TOKEN
 read_secret "Rubika bot token (hidden): " RUBIKA_TOKEN
 read_secret "Soroush Plus bot token (hidden): " SOROUSH_TOKEN
+read -rp "Migration mode [migrate/clone] (default: migrate): " MIGRATION_MODE
+MIGRATION_MODE="${MIGRATION_MODE:-migrate}"
+case "$MIGRATION_MODE" in
+  migrate|clone) ;;
+  *) echo "MIGRATION_MODE must be migrate or clone"; exit 1 ;;
+esac
 read -rp "Start production services after migration? [y/N]: " START_NOW
 START_NOW="${START_NOW:-N}"
 read_secret "New MySQL root password (blank = generate): " NEW_DB_ROOT_PASSWORD
@@ -57,7 +63,7 @@ if [[ -z "$NEW_DB_ROOT_PASSWORD" ]]; then
 fi
 
 if [[ "$DRY_RUN" == "1" ]]; then
-  say "DRY RUN: source=$SOURCE_HOST user=$SOURCE_USER website=$SITE_DOMAIN panel=$PANEL_DOMAIN start=$START_NOW"
+  say "DRY RUN: mode=$MIGRATION_MODE source=$SOURCE_HOST user=$SOURCE_USER website=$SITE_DOMAIN panel=$PANEL_DOMAIN start=$START_NOW"
   say "No downloads, package installation, database writes, DNS changes or service changes would run."
   exit 0
 fi
@@ -254,8 +260,12 @@ else
 fi
 
 if [[ "$START_NOW" =~ ^[Yy]$ ]]; then
-  say "Stopping services on the old server before starting the new services"
-  sshpass -e ssh "${SSH_OPTS[@]}" "$SOURCE_SSH" 'systemctl stop modasr-site modasr-hosting-staging modasr-hosting-full-php modasr-hosting-tenant-1.service modasr-hosting-tenant-2.service; docker stop n8n || true'
+  if [[ "$MIGRATION_MODE" == "migrate" ]]; then
+    say "Stopping services on the old server before starting the new services"
+    sshpass -e ssh "${SSH_OPTS[@]}" "$SOURCE_SSH" 'systemctl stop modasr-site modasr-hosting-staging modasr-hosting-full-php modasr-hosting-tenant-1.service modasr-hosting-tenant-2.service; docker stop n8n || true'
+  else
+    say "Clone mode: source services stay online; only the new instance is started"
+  fi
 
   systemctl daemon-reload
   systemctl enable --now modasr-site modasr-hosting-staging modasr-hosting-full-php
@@ -279,14 +289,21 @@ if [[ "$START_NOW" =~ ^[Yy]$ ]]; then
 
   say "Running the production health check"
   if ! curl -fsS --max-time 25 "https://${PANEL_DOMAIN}/api/storefront_catalog" | grep -q '"status"[[:space:]]*:[[:space:]]*true'; then
-    say "Health check failed; restoring the old services"
-    systemctl stop modasr-site modasr-hosting-staging modasr-hosting-full-php || true
-    for unit in /etc/systemd/system/modasr-hosting-tenant-*.service; do systemctl stop "$(basename "$unit")" || true; done
-    docker stop n8n || true
-    sshpass -e ssh "${SSH_OPTS[@]}" "$SOURCE_SSH" 'systemctl start modasr-site modasr-hosting-staging modasr-hosting-full-php modasr-hosting-tenant-1.service modasr-hosting-tenant-2.service; docker start n8n || true'
+    if [[ "$MIGRATION_MODE" == "migrate" ]]; then
+      say "Health check failed; restoring the old services"
+      systemctl stop modasr-site modasr-hosting-staging modasr-hosting-full-php || true
+      for unit in /etc/systemd/system/modasr-hosting-tenant-*.service; do systemctl stop "$(basename "$unit")" || true; done
+      docker stop n8n || true
+      sshpass -e ssh "${SSH_OPTS[@]}" "$SOURCE_SSH" 'systemctl start modasr-site modasr-hosting-staging modasr-hosting-full-php modasr-hosting-tenant-1.service modasr-hosting-tenant-2.service; docker start n8n || true'
+    else
+      say "Health check failed in the new clone; source services were not changed"
+      systemctl stop modasr-site modasr-hosting-staging modasr-hosting-full-php || true
+      for unit in /etc/systemd/system/modasr-hosting-tenant-*.service; do systemctl stop "$(basename "$unit")" || true; done
+      docker stop n8n || true
+    fi
     exit 1
   fi
-  say "Migration completed successfully. The new website, panel and bots are running."
+  say "Migration completed successfully in $MIGRATION_MODE mode. The new website, panel and bots are running."
 else
   say "Files and databases are restored. Production services were not started because DNS/start approval is pending."
   say "After DNS is ready, run this script again and choose Start production services."
