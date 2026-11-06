@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.token
+*.sql
+*.sql.gz
+*.enc
+*.log
+*.tar
+*.tar.gz
+node_modules/
+vendor/
